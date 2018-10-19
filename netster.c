@@ -4,7 +4,7 @@
 #include <getopt.h>
 #include "nester.h"
 
-#define DEFAULT_PORT 12345
+#define DEFAULT_PORT 8210
 
 /*
  * If we are a server, launch the appropriate methods to handle server
