@@ -16,7 +16,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <semaphore.h>
-
+#include <ctype.h>
 
 #include "a2.h"
 #include "queue.h"
@@ -54,7 +54,7 @@ void* start_timer(void *thread_data) {
     fd_set readset;
     struct timeval tv;
     
-    char data[7];
+    char data[7] = {0};
 
     set_non_blocking(&sockfd);
 
@@ -62,15 +62,14 @@ void* start_timer(void *thread_data) {
         sem_wait(&timer_start);
         int end;
         int start;
-
         start = clock() * 1000 / CLOCKS_PER_SEC;
-
         do{
             retval = read(sockfd,data, sizeof(data)); 
             if(retval != EAGAIN){
-                char ack[7] = {'A', 'C', 'K'};
-                strcat(ack, &expected_sequence);
+                char ack[7] = {0};
+                sprintf(ack, "ACK%d", expected_sequence);
                 if(strcmp(data, ack) == 0){
+		    printf("MActhing ack found %s\n", ack);
                     go_back_n = false;
                     expected_sequence ++;
                     break;
@@ -81,9 +80,12 @@ void* start_timer(void *thread_data) {
 
         }while((end - start) < TIMEOUT);
 
-        if((end - start) > TIMEOUT){
+        if((end - start) >= TIMEOUT){
+	    printf("Go back now\n");
             go_back_n = true;
         }
+
+	printf("Got ACK from server %s\n", data);
 
         sem_post(&send_data);
     }
@@ -99,10 +101,10 @@ void start_server(cfg_t *config)
     uint8_t packet[MAX_BUFFER_SIZE + 1];
     unsigned char ip[sizeof(struct in_addr)];
     char buff[MAX_BUFFER_SIZE];
-    uint8_t expected_seq = 0;
-
+    uint8_t expected_seq = 1;
+   
     struct sockaddr_in server_addr, client_addr;
-    config->server = "127.0.0.1";
+    config->server = "10.10.2.10";
 
     memset(&server_addr, 0, sizeof(server_addr));
     memset(&client_addr, 0, sizeof(client_addr));
@@ -148,25 +150,33 @@ void start_server(cfg_t *config)
 
             // check  if the seq number is same as expected then
             // write to the buffer and send ack.
-            uint8_t seq = packet[0] - '0';
-            printf("seq %d expected_seq %d\n", seq, expected_seq);
-            if (seq == expected_seq)
+            char seq[4] = {0};
+            int i=0, count = 0;
+            while(i < 3){
+                if(isdigit(packet[i])){
+                    seq[i] = packet[i];
+                    count ++;
+                }
+                i++;
+            }
+	    uint8_t i_seq = atoi(seq);
+            if (i_seq == expected_seq)
             {
-                memcpy(buff, &packet[1], n - 1);
-                fwrite(buff, 1, n - 1, config->fstream);
+                memcpy(buff, &packet[count], n - count);
+                fwrite(buff, 1, strlen(buff), config->fstream);
                 memset(packet, 0, sizeof(buff));
                 memset(buff, 0, sizeof(buff));
-                char ack_buffer[5] = {'A', 'C', 'K'};
-                ack_buffer[3] = 48 + seq;
-                printf("\nACK sending.... %s\n", ack_buffer);
+                char ack_buffer[7] = {0};
+                sprintf(ack_buffer, "ACK%d", expected_seq);
+                printf("Sending ACK.... %s\n", ack_buffer);
                 sendto(server_fd, ack_buffer, sizeof(ack_buffer), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-                expected_seq = seq ^ 1;
+                expected_seq ++;
             }
             else
             {
-                char ack_buffer[5] = {'A', 'C', 'K'};
-                ack_buffer[3] = 48 + seq;
-                printf("\n Server sendning ACK .....%s\n", ack_buffer);
+                char ack_buffer[7] = {0};
+                sprintf(ack_buffer, "ACK%d", expected_seq - 1);
+                printf("\n ACK not matched sending .....%s\n", ack_buffer);
                 sendto(server_fd, ack_buffer, sizeof(ack_buffer), 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
             }
         }
@@ -245,15 +255,23 @@ void start_client(cfg_t *config)
                     head_sequence_number++;
                     sprintf(packet, "%d", head_sequence_number);
                     nread = fread(packet + strlen(packet), 1, sizeof(packet) -2 , config->fstream);
-                    packet[MAX_BUFFER_SIZE] = '\0';  
-                    if(nread < 0){
+                    packet[MAX_BUFFER_SIZE] = '\0';
+                    if(nread <= 0){
                         //send good bye to server
+			if(packets->front != NULL){
+				sem_post(&timer_start);
+				break;
+			}
                         printf("Sending Good_bye !!!\n");
                         sendto(client_fd, "GOOD_BYE", strlen("GOOD_BYE"), 0, (struct sockaddr *)&server_addr, sizeof(server_addr));
                         close(client_fd);
                         go_back_n = false;
-                        break;
+                        m_run_timer_thread = false;
+                        sem_post(&timer_start);
+                        pthread_join(timer_thread,NULL);
+                        return;
                     }
+		    printf("Sending data %s\n", packet);
                     sendto(client_fd, packet, sizeof(packet), 0, (const struct sockaddr *)&server_addr, sizeof(server_addr));
                     enQueue(packets,packet);
                     if(head_sequence_number == 1 || !go_back_n){
@@ -266,22 +284,20 @@ void start_client(cfg_t *config)
                 while(go_back_n){
                     struct QNode *cur = packets->front;
                     while(cur != NULL){
+			printf("sending data %s\n", cur->buffer);
                         sendto(client_fd, cur->buffer, sizeof(cur->buffer), 0, (const struct sockaddr *)&server_addr, sizeof(server_addr));
                         if(cur == packets->front) {
                             sem_post(&timer_start);
-                            sem_wait(&send_data);
                         }
+                        cur = cur->next;
                     }
+		    sem_wait(&send_data);
                 }
                 deQueue(packets);
-                
             }
 
         }
         
 
     } while (err != 0);
-
-    m_run_timer_thread = false;
-    pthread_join(timer_thread,NULL);
 }
